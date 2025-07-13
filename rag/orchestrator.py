@@ -1,15 +1,15 @@
 import logging
+import time
 from operator import itemgetter
 from typing import Any, Dict, List
 
-from langchain_core.documents import Document
 from langchain_core.runnables import RunnablePassthrough, RunnableLambda
 from langchain_core.output_parsers import StrOutputParser
 from configs import RAGConfig
 from data_processing.loader_factory import DataLoaderFactory
 from rag.models import Answer, DocumentChunk
 from rag.prompt_templates import ANSWER_GENERATION_PROMPT
-
+from rag.utils import format_documents, docs_to_answer
 
 from llm.client import LLMFactory
 from vector_store.vector_store import VectorStoreFactory
@@ -134,43 +134,21 @@ class RAGOrchestrator:
 
     def _build_chain(self):
         """
-        Builds a RAG chain using LCEL.
-        """
+        Build RAG chain using LangChain Expression Language (LCEL).
+         
+        Raises:
+            RuntimeError: If chain building fails
+            ValueError: If required components are missing
+            """
+        if not self.retriever:
+            raise ValueError("Retriever not initialized")
+        if not self.llm:
+            raise ValueError("LLM not initialized")
+
         # NOTE: This is a basic thread. It does not take chat history into account.
         # TODO: Integrate RunnableBranch to reformulate the question
         # based on conversation history.
         try:
-            def format_documents(docs: List[Document]) -> str:
-                if not docs:
-                    return "Контекст не найден."
-                formatted = []
-                for i, doc in enumerate(docs):
-                    # Предполагаем, что metadata содержит document_id и page_number
-                    doc_id = doc.metadata.get('source', 'UNKNOWN')
-                    page_num = doc.metadata.get('page_label', 'UNKNOWN')
-                    source_tag = f"[{doc_id}/PAGE_{page_num}]"
-                    formatted.append(f"Источник {i+1} {source_tag}:\n{doc.page_content}")
-                return "\n\n".join(formatted)
-            
-            def docs_to_answer(data: Dict[str, Any]) -> Answer:
-                source_chunks = []
-                # for doc in data["retrieved_docs"]:
-                #     chunk = DocumentChunk(
-                #         content=doc.page_content,
-                #         filename=doc.metadata.get('source', 'UNKNOWN'),
-                #         document_id=doc.metadata.get('source', 'UNKNOWN'),
-                #         page_number=doc.metadata.get('page_label', 0),
-                #         chunk_index=doc.metadata.get('start_index', 0),
-                #         score=doc.metadata.get('relevance_score', 0),
-                #         # metadata=doc.metadata
-                #     )
-                #     source_chunks.append(chunk)
-                
-                return Answer(
-                    answer_text=data["answer_text"] if data["answer_text"] else "No answer",
-                    source_chunks=data["retrieved_docs"]
-                )
-
             self._rag_chain = (
                 # step 1: retrieve chunks
                 RunnablePassthrough()
@@ -202,3 +180,58 @@ class RAGOrchestrator:
         # Need to create a Pydantic model for the response and a parser.
         result = self._rag_chain.invoke({"question": query, "chat_history": ""})
         return result
+
+
+    async def health_check(self) -> Dict[str, Dict[str, Any]]:
+        """
+        Perform comprehensive health check of all RAG components.
+        
+        Returns: Dict[str, Dict[str, Any]]
+            Dict mapping component names to their health status
+        """
+        components = {}
+        
+        # Check vector store
+        try:
+            if self.vector_store and self.vector_store.index_exists():
+                components["vector_store"] = {
+                    "status": "healthy",
+                    "index_size": self.vector_store.get_index_size(),
+                }
+            else:
+                components["vector_store"] = {"status": "unhealthy", "error": "Index not found"}
+        except Exception as e:
+            components["vector_store"] = {"status": "unhealthy", "error": str(e)}
+        
+        # Check LLM
+        try:
+            if self.llm:
+                # Quick health check with simple query
+                start_time = time.time()
+                test_response = self.llm.invoke("Test")
+                latency = (time.time() - start_time) * 1000
+                components["llm"] = {
+                    "status": "healthy" if test_response else "degraded",
+                    "latency_ms": round(latency, 2)
+                }
+            else:
+                components["llm"] = {"status": "unhealthy", "error": "LLM not initialized"}
+        except Exception as e:
+            components["llm"] = {"status": "unhealthy", "error": str(e)}
+        
+        # Check retriever
+        try:
+            if self.retriever:
+                # Test retrieval with simple query
+                test_docs = self.retriever.get_relevant_documents("test", k=1)
+                components["retriever"] = {
+                    "status": "healthy",
+                    "test_results": len(test_docs)
+                }
+            else:
+                components["retriever"] = {"status": "unhealthy", "error": "Retriever not initialized"}
+        except Exception as e:
+            components["retriever"] = {"status": "unhealthy", "error": str(e)}
+        
+        return components
+    

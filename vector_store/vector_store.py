@@ -164,6 +164,15 @@ class FAISSBMExtractRetriever:
 
         return self.ensemble_retriever
     
+    def get_index_size(self) -> int:
+        """
+        Return the number of documents currently indexed.
+
+        Returns: int
+            Number of indexed documents.
+        """
+        return len(self._documents)
+    
     def _initialize_embeddings(self) -> None:
         """
         Initialize embedding model
